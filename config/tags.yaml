@@ -2,7 +2,7 @@
     ros__parameters:
         image_transport: raw    # image format
         family: 36h11           # tag family name
-        size: 0.173             # tag edge size in meter
+        size: 0.150             # tag edge size in meter
         max_hamming: 0          # maximum allowed hamming distance (corrected bits)
         qos_profile: default    # optional qos_profile, "sensor_data", "default", or "system_default"
 
@@ -22,4 +22,4 @@
         tag:
             ids: [0]            # tag ID
             frames: [tag0]  # optional frame name
-            sizes: [0.173]   # optional tag-specific edge size
+            sizes: [0.150]   # optional tag-specific edge size
