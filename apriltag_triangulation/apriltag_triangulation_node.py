@@ -223,7 +223,7 @@ class AprilTagTriangulationNode(Node):
             #     T_fused = T1
             # else:
             #     T_fused = average_poses(T1, T2)
-            T_fused = average_poses(T1, T2)
+            T_fused = average_poses(T1, T2) #* 0.8 # MAKE SURE YOU ADJUST THIS RATIO
 
         elif T1 is not None:
             T_fused = T1

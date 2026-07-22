@@ -42,6 +42,10 @@ def generate_launch_description():
         DeclareLaunchArgument('tag_size',    default_value='0.1'),    # metres
         DeclareLaunchArgument('tag_family',  default_value='36h11'),  # AprilTag family
         DeclareLaunchArgument('world_frame', default_value='world'),
+        # Per-camera range-scale corrections from the Phase 2 test:
+        #   depth_scale = measured_distance / true_distance  (1.0 = off)
+        DeclareLaunchArgument('cam1_depth_scale', default_value='1.0'),
+        DeclareLaunchArgument('cam2_depth_scale', default_value='1.0'),
 
         # cam2 extrinsic — from measure_cam2_extrinsic.py
         DeclareLaunchArgument('cam2_tx', default_value='1.0'),
@@ -51,6 +55,11 @@ def generate_launch_description():
         DeclareLaunchArgument('cam2_qy', default_value='0.0'),
         DeclareLaunchArgument('cam2_qz', default_value='0.707'),
         DeclareLaunchArgument('cam2_qw', default_value='0.707'),
+
+        # Geometric triangulation: tape-measured baseline anchor (0 = off,
+        # use the TF extrinsic length as-is). Legitimate for ray
+        # intersection only — never applied to the pose-fusion path.
+        DeclareLaunchArgument('geo_baseline_override', default_value='0.0'),
     ]
 
     # Tag config yaml — shared by both apriltag_node instances
@@ -119,6 +128,7 @@ def generate_launch_description():
                 'camera_frame':     'cam1_optical_frame',
                 'detections_topic': '/cam1/apriltag/detections',
                 'tag_frame':        'tag0_cam1',
+                'depth_scale':      LaunchConfiguration('cam1_depth_scale'),
             }],
             remappings=[
                 ('apriltag_pose',     '/cam1/apriltag_pose'),
@@ -176,6 +186,7 @@ def generate_launch_description():
                 'camera_frame':     'cam2_optical_frame',
                 'detections_topic': '/cam2/apriltag/detections',
                 'tag_frame':        'tag0_cam2',
+                'depth_scale':      LaunchConfiguration('cam2_depth_scale'),
             }],
             remappings=[
                 ('apriltag_pose',     '/cam2/apriltag_pose'),
@@ -222,12 +233,28 @@ def generate_launch_description():
         }],
     )
 
+    # ── Geometric triangulation node (scale-independent cross-check) ──────────
+    geometric_node = Node(
+        package='apriltag_triangulation',
+        executable='geometric_triangulation_node',
+        name='geometric_triangulation_node',
+        parameters=[{
+            'tag_id':            LaunchConfiguration('tag_id'),
+            'world_frame':       LaunchConfiguration('world_frame'),
+            'cam1_frame':        'cam1_optical_frame',
+            'cam2_frame':        'cam2_optical_frame',
+            'baseline_override': LaunchConfiguration('geo_baseline_override'),
+            'max_age_sec':       1.0,
+        }],
+    )
+
     return LaunchDescription(
         args + [
             cam1_group,
             tf_cam1,
             tf_cam2,
             TimerAction(period=3.0, actions=[cam2_group]),
-            TimerAction(period=6.0, actions=[triangulation_node]),
+            TimerAction(period=6.0, actions=[triangulation_node,
+                                             geometric_node]),
         ]
     )

@@ -6,7 +6,7 @@ package_name = 'apriltag_triangulation'
 
 setup(
     name=package_name,
-    version='0.1.0',
+    version='0.2.0',
     packages=find_packages(exclude=['test']),
     data_files=[
         ('share/ament_index/resource_index/packages',
@@ -28,6 +28,8 @@ setup(
         'console_scripts': [
             'apriltag_adapter_node = apriltag_triangulation.apriltag_adapter_node:main',
             'apriltag_triangulation_node = apriltag_triangulation.apriltag_triangulation_node:main',
+            'measure_cam2_extrinsic_apriltag = apriltag_triangulation.measure_cam2_extrinsic_apriltag:main',
+            'geometric_triangulation_node = apriltag_triangulation.geometric_triangulation_node:main',
         ],
     },
 )
