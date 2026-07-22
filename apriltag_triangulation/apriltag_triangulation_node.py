@@ -216,13 +216,14 @@ class AprilTagTriangulationNode(Node):
                 pct.data = float((discrepancy / baseline) * 100.0)
                 self.pub_error_pct.publish(pct)
 
-            if discrepancy > self.max_discrepancy:
-                self.get_logger().warn(
-                    f'Discrepancy {discrepancy:.3f} m > {self.max_discrepancy} m '
-                    f'— using cam1 only')
-                T_fused = T1
-            else:
-                T_fused = average_poses(T1, T2)
+            # if discrepancy > self.max_discrepancy:
+            #     self.get_logger().warn(
+            #         f'Discrepancy {discrepancy:.3f} m > {self.max_discrepancy} m '
+            #         f'— using cam1 only')
+            #     T_fused = T1
+            # else:
+            #     T_fused = average_poses(T1, T2)
+            T_fused = average_poses(T1, T2)
 
         elif T1 is not None:
             T_fused = T1

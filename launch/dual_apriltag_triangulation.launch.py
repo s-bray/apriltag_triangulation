@@ -83,6 +83,10 @@ def generate_launch_description():
         # apriltag_ros detection node
         # NOTE: apriltag_ros expects rectified images on image_rect
         # For uncalibrated/already-undistorted cameras use image_raw
+        # IMPORTANT: the dict AFTER tags_cfg overrides 'size' from it —
+        # this is what actually makes tag_size:=X on the command line work.
+        # Without this second dict, apriltag_node silently keeps using
+        # whatever 'size' is hardcoded in tags.yaml regardless of tag_size.
         Node(
             package='apriltag_ros',
             executable='apriltag_node',
@@ -92,7 +96,16 @@ def generate_launch_description():
                 ('camera_info',  '/cam1/camera_info'),
                 ('detections',   '/cam1/apriltag/detections'),
             ],
-            parameters=[tags_cfg],
+            # CRITICAL: unique tag frame per camera. Both cameras publishing
+            # the same child frame 'tag0' makes its TF parent flip-flop, and
+            # lookups then silently route through world → the static launch
+            # extrinsic, contaminating "raw" detections with launch values.
+            # NOTE: tag.ids is hardcoded [0]; change together with tag_id.
+            parameters=[tags_cfg, {
+                'size': LaunchConfiguration('tag_size'),
+                'tag.ids': [0],
+                'tag.frames': ['tag0_cam1'],
+            }],
         ),
 
         # Adapter: TF detections → PoseStamped topic
@@ -105,6 +118,7 @@ def generate_launch_description():
                 'tag_family':       LaunchConfiguration('tag_family'),
                 'camera_frame':     'cam1_optical_frame',
                 'detections_topic': '/cam1/apriltag/detections',
+                'tag_frame':        'tag0_cam1',
             }],
             remappings=[
                 ('apriltag_pose',     '/cam1/apriltag_pose'),
@@ -144,7 +158,12 @@ def generate_launch_description():
                 ('camera_info', '/cam2/camera_info'),
                 ('detections',  '/cam2/apriltag/detections'),
             ],
-            parameters=[tags_cfg],
+            # Unique frame — see cam1 comment. NOTE: tag.ids hardcoded [0].
+            parameters=[tags_cfg, {
+                'size': LaunchConfiguration('tag_size'),
+                'tag.ids': [0],
+                'tag.frames': ['tag0_cam2'],
+            }],
         ),
 
         Node(
@@ -156,6 +175,7 @@ def generate_launch_description():
                 'tag_family':       LaunchConfiguration('tag_family'),
                 'camera_frame':     'cam2_optical_frame',
                 'detections_topic': '/cam2/apriltag/detections',
+                'tag_frame':        'tag0_cam2',
             }],
             remappings=[
                 ('apriltag_pose',     '/cam2/apriltag_pose'),

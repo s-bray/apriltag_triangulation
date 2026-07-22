@@ -38,6 +38,12 @@ class AprilTagAdapterNode(Node):
         self.declare_parameter('detections_topic', '/apriltag/detections')
         self.declare_parameter('min_decision_margin', 50.0)  # confidence threshold
         self.declare_parameter('publish_rate_hz', 20.0)
+        # Explicit TF frame for this camera's tag detection. MUST be unique
+        # per camera (e.g. 'tag0_cam1' / 'tag0_cam2') and match tag.frames
+        # in the apriltag_node parameters. If two cameras share one tag
+        # frame name, TF parent flip-flopping silently routes lookups
+        # through world → static launch extrinsic, contaminating the data.
+        self.declare_parameter('tag_frame', '')
 
         self.tag_id        = self.get_parameter('tag_id').value
         self.tag_family    = self.get_parameter('tag_family').value
@@ -46,9 +52,10 @@ class AprilTagAdapterNode(Node):
         self.min_margin    = self.get_parameter('min_decision_margin').value
         rate_hz            = self.get_parameter('publish_rate_hz').value
 
-        # TF child frame published by apriltag_ros
-        # self.tag_frame = f'tag{self.tag_family}:{self.tag_id}'
-        self.tag_frame = f'tag{self.tag_id}'
+        # TF child frame: explicit override, else apriltag_ros default
+        self.tag_frame = self.get_parameter('tag_frame').value
+        if not self.tag_frame:
+            self.tag_frame = f'tag{self.tag_id}'
 
 
         # ── TF ───────────────────────────────────────────────────────────────

@@ -75,6 +75,7 @@ class ExtrinsicMeasurer(Node):
             'n_samples',
             200
         )
+        self.declare_parameter('current_tag_size', 0.15)    # m, must match live tags.yaml
 
 
         self.n_samples = (
@@ -89,6 +90,7 @@ class ExtrinsicMeasurer(Node):
 
         self.latest_cam1 = None
         self.latest_cam2 = None
+        self.current_tag_size  = self.get_parameter('current_tag_size').value
 
 
 
@@ -306,20 +308,23 @@ Camera baseline:
 """
         )
 
-
-        print(
-            "static_transform_publisher command:"
-        )
-
-
-        print(
-            f"""
-ros2 run tf2_ros static_transform_publisher \\
-{t_mean[0]:.6f} {t_mean[1]:.6f} {t_mean[2]:.6f} \\
-{q_mean[0]:.6f} {q_mean[1]:.6f} {q_mean[2]:.6f} {q_mean[3]:.6f} \\
-cam1_optical_frame cam2_optical_frame
-"""
-        )
+        print('Launch command (uses current_tag_size — recalibrate if you change it):')
+        print(f'''
+            ros2 launch apriltag_triangulation dual_apriltag_triangulation.launch.py \\
+                cam1_device:=/dev/video0 \\
+                cam2_device:=/dev/video2 \\
+                cam1_calib:=file:///home/ros/ws/src/camera_calibrations/camera_calib/ost.yaml \\
+                cam2_calib:=file:///home/ros/ws/src/camera_calibrations/camera_calib/ost.yaml \\
+                tag_size:={self.current_tag_size:.4f} \\
+                tag_id:=0 \\
+                cam2_tx:='{t_mean[0]:.6f}' \\
+                cam2_ty:='{t_mean[1]:.6f}' \\
+                cam2_tz:='{t_mean[2]:.6f}' \\
+                cam2_qx:='{q_mean[0]:.6f}' \\
+                cam2_qy:='{q_mean[1]:.6f}' \\
+                cam2_qz:='{q_mean[2]:.6f}' \\
+                cam2_qw:='{q_mean[3]:.6f}'
+        ''')
 
 
         print("="*60)
