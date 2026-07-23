@@ -30,6 +30,9 @@ setup(
             'apriltag_triangulation_node = apriltag_triangulation.apriltag_triangulation_node:main',
             'measure_cam2_extrinsic_apriltag = apriltag_triangulation.measure_cam2_extrinsic_apriltag:main',
             'geometric_triangulation_node = apriltag_triangulation.geometric_triangulation_node:main',
+            'multi_apriltag_fusion_node = apriltag_triangulation.multi_apriltag_fusion_node:main',
+            'multi_geometric_triangulation_node = apriltag_triangulation.multi_geometric_triangulation_node:main',
+            'measure_extrinsics_multi = apriltag_triangulation.measure_extrinsics_multi:main',
         ],
     },
 )
