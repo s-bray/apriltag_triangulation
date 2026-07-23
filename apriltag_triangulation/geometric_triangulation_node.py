@@ -46,6 +46,7 @@ from rclpy.node import Node
 import numpy as np
 import cv2
 import tf2_ros
+import tf2_geometry_msgs  # noqa: F401 — registers PoseStamped transforms
 from geometry_msgs.msg import PoseStamped
 from sensor_msgs.msg import CameraInfo
 from std_msgs.msg import Float32
@@ -87,7 +88,7 @@ class GeometricTriangulationNode(Node):
         self.D = {1: None, 2: None}          # distortion coeffs
         self.det = {1: None, 2: None}        # latest detection msg
         self.fused_latest: PoseStamped | None = None
-        self.cam1_pose_latest: PoseStamped | None = None  # for orientation
+        self.cam_pose_latest = {1: None, 2: None}  # per-camera PnP poses
 
         # ── Subscribers ───────────────────────────────────────────────────
         self.create_subscription(CameraInfo, '/cam1/camera_info',
@@ -103,7 +104,9 @@ class GeometricTriangulationNode(Node):
         self.create_subscription(PoseStamped, '/apriltag/triangulated_pose',
                                  self._fused_cb, 10)
         self.create_subscription(PoseStamped, '/cam1/apriltag_pose',
-                                 self._cam1_pose_cb, 10)
+                                 lambda m: self._cam_pose_cb(1, m), 10)
+        self.create_subscription(PoseStamped, '/cam2/apriltag_pose',
+                                 lambda m: self._cam_pose_cb(2, m), 10)
 
         # ── Publishers ────────────────────────────────────────────────────
         self.pub_pose  = self.create_publisher(
@@ -114,6 +117,9 @@ class GeometricTriangulationNode(Node):
             Float32, '/apriltag/ray_gap', 10)
         self.pub_scale = self.create_publisher(
             Float32, '/apriltag/scale_check', 10)
+        # 2.0 = true 2-ray intersection; 1.0 = single-camera PnP fallback
+        self.pub_mode  = self.create_publisher(
+            Float32, '/apriltag/geometric_mode', 10)
 
         self.create_timer(1.0 / rate_hz, self._tick)
 
@@ -131,7 +137,7 @@ class GeometricTriangulationNode(Node):
 
     def _det_cb(self, cam, msg): self.det[cam] = msg
     def _fused_cb(self, msg):    self.fused_latest = msg
-    def _cam1_pose_cb(self, msg): self.cam1_pose_latest = msg
+    def _cam_pose_cb(self, cam, msg): self.cam_pose_latest[cam] = msg
 
     # ── Helpers ───────────────────────────────────────────────────────────
     def _fresh(self, msg) -> bool:
@@ -191,10 +197,77 @@ class GeometricTriangulationNode(Node):
         d_world = Rm @ d_cam
         return C, d_world
 
+    def _pose_to_world(self, ps: PoseStamped):
+        """Transform a camera-frame PoseStamped into world via TF."""
+        try:
+            return self.tf_buffer.transform(
+                ps, self.world_frame,
+                timeout=rclpy.duration.Duration(seconds=0.05))
+        except Exception as ex:
+            self.get_logger().warn(f'Fallback TF failed: {ex}',
+                                   throttle_duration_sec=5.0)
+            return None
+
+    def _publish_result(self, position, orientation, mode: float):
+        """Common publishing path for 2-ray and fallback modes."""
+        ps = PoseStamped()
+        ps.header.stamp = self.get_clock().now().to_msg()
+        ps.header.frame_id = self.world_frame
+        ps.pose.position.x = float(position[0])
+        ps.pose.position.y = float(position[1])
+        ps.pose.position.z = float(position[2])
+        ps.pose.orientation = orientation
+        self.pub_pose.publish(ps)
+
+        dist = Float32()
+        dist.data = float(np.linalg.norm(position))
+        self.pub_dist.publish(dist)
+
+        m = Float32(); m.data = mode
+        self.pub_mode.publish(m)
+
+        if self.fused_latest is not None and self._fresh(self.fused_latest):
+            f = self.fused_latest.pose.position
+            n_fused = float(np.linalg.norm([f.x, f.y, f.z]))
+            if n_fused > 1e-6:
+                sc = Float32()
+                sc.data = float(np.linalg.norm(position)) / n_fused
+                self.pub_scale.publish(sc)
+
+    def _default_orientation(self):
+        from geometry_msgs.msg import Quaternion
+        q = Quaternion(); q.w = 1.0
+        return q
+
     # ── Main tick ─────────────────────────────────────────────────────────
     def _tick(self):
         r1 = self._ray(1, self.cam1_frame)
         r2 = self._ray(2, self.cam2_frame)
+
+        # ── Single-camera FALLBACK ────────────────────────────────────────
+        # One ray has direction but no depth: true geometric triangulation
+        # is impossible with a single camera. Publish that camera's PnP
+        # pose transformed to world instead — output stays available and
+        # world-framed, but scale rides on fx·L while in this mode.
+        # geometric_mode = 1.0 flags it.
+        if (r1 is None) != (r2 is None):
+            cam = 1 if r1 is not None else 2
+            src = self.cam_pose_latest[cam]
+            if src is None or not self._fresh(src):
+                return
+            ps_w = self._pose_to_world(src)
+            if ps_w is None:
+                return
+            pos = np.array([ps_w.pose.position.x,
+                            ps_w.pose.position.y,
+                            ps_w.pose.position.z])
+            self.get_logger().info(
+                f'Geometric fallback: only cam{cam} visible — publishing '
+                'its PnP pose in world frame',
+                throttle_duration_sec=5.0)
+            self._publish_result(pos, ps_w.pose.orientation, mode=1.0)
+            return
+
         if r1 is None or r2 is None:
             return
         C1, d1 = r1
@@ -229,35 +302,13 @@ class GeometricTriangulationNode(Node):
         gm = Float32(); gm.data = gap
         self.pub_gap.publish(gm)
 
-        ps = PoseStamped()
-        ps.header.stamp = self.get_clock().now().to_msg()
-        ps.header.frame_id = self.world_frame
-        ps.pose.position.x = float(midpoint[0])
-        ps.pose.position.y = float(midpoint[1])
-        ps.pose.position.z = float(midpoint[2])
-        # Orientation: geometric triangulation is position-only; reuse
-        # cam1's PnP orientation so the message is a complete pose.
-        if self.cam1_pose_latest is not None \
-                and self._fresh(self.cam1_pose_latest):
-            ps.pose.orientation = self.cam1_pose_latest.pose.orientation
+        # Orientation: position-only method; reuse cam1's PnP orientation.
+        c1p = self.cam_pose_latest[1]
+        if c1p is not None and self._fresh(c1p):
+            ori = c1p.pose.orientation
         else:
-            ps.pose.orientation.w = 1.0
-        self.pub_pose.publish(ps)
-
-        # Distance from world origin (= cam1 lens): √(x²+y²+z²).
-        dist = Float32()
-        dist.data = float(np.linalg.norm(midpoint))
-        self.pub_dist.publish(dist)
-
-        # ── Scale check vs pose fusion ────────────────────────────────────
-        if self.fused_latest is not None and self._fresh(self.fused_latest):
-            f = self.fused_latest.pose.position
-            n_fused = float(np.linalg.norm([f.x, f.y, f.z]))
-            n_geo   = float(np.linalg.norm(midpoint))
-            if n_fused > 1e-6:
-                sc = Float32()
-                sc.data = n_geo / n_fused
-                self.pub_scale.publish(sc)
+            ori = self._default_orientation()
+        self._publish_result(midpoint, ori, mode=2.0)
 
 
 def main(args=None):

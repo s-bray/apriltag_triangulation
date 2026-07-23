@@ -7,10 +7,15 @@ localisation and navigation.
 
 Two independent methods run side by side:
 
-| Method | Node | Depth comes from | Output topic |
+| Method | Node (2-cam / 3-cam) | Depth comes from | Output topic |
 |---|---|---|---|
-| **Pose fusion** (PnP average) | `apriltag_triangulation_node` | tag's apparent size (fx·L) | `/apriltag/triangulated_pose` |
-| **Geometric triangulation** (ray intersection) | `geometric_triangulation_node` | camera baseline geometry | `/apriltag/geometric_pose` |
+| **Pose fusion** (PnP average) | `apriltag_triangulation_node` / `multi_apriltag_fusion_node` | tag's apparent size (fx·L) | `/apriltag/triangulated_pose` |
+| **Geometric triangulation** (ray intersection) | `geometric_triangulation_node` / `multi_geometric_triangulation_node` | camera baseline geometry | `/apriltag/geometric_pose` |
+
+Both outputs are **always published in the world frame from whatever cameras
+currently see the tag** — down to a single camera (see the fallback notes in
+sections 4–5). The 3-camera variants add majority voting (fusion) and
+least-squares multi-ray intersection (geometric); see section 11.
 
 Having both is deliberate: they fail differently, so comparing them measures
 the system's own error live.
@@ -96,14 +101,18 @@ Tag frame convention: origin at the tag centre, +Z out of the tag face.
 ```
 apriltag_triangulation/
 ├── apriltag_triangulation/
-│   ├── apriltag_adapter_node.py          # TF → topic bridge (one per camera)
-│   ├── apriltag_triangulation_node.py    # Method A: pose fusion
-│   ├── geometric_triangulation_node.py   # Method B: ray intersection
-│   └── measure_cam2_extrinsic_apriltag.py# extrinsic calibration tool (v3)
+│   ├── apriltag_adapter_node.py              # TF → topic bridge (one per camera)
+│   ├── apriltag_triangulation_node.py        # Method A, 2 cameras
+│   ├── geometric_triangulation_node.py       # Method B, 2 cameras (+ fallback)
+│   ├── multi_apriltag_fusion_node.py         # Method A, N cameras + voting
+│   ├── multi_geometric_triangulation_node.py # Method B, N rays LSQ (+ fallback)
+│   ├── measure_cam2_extrinsic_apriltag.py    # extrinsic calibration (2-cam, v3)
+│   └── measure_extrinsics_multi.py           # extrinsic calibration (3-cam)
 ├── launch/
-│   └── dual_apriltag_triangulation.launch.py
+│   ├── dual_apriltag_triangulation.launch.py
+│   └── triple_apriltag_triangulation.launch.py
 ├── config/
-│   └── tags.yaml                         # apriltag_ros detector settings
+│   └── tags.yaml                             # apriltag_ros detector settings
 ├── package.xml / setup.py / setup.cfg / resource/
 ```
 
@@ -174,8 +183,11 @@ proportional to the **fx·L product** — remember this for section 6.
    quaternion mean (quaternions q and −q encode the same rotation; one is
    flipped if their dot product is negative, then the normalised mean is
    taken — a good approximation of SLERP at 50/50 weight).
-5. **Fallback.** If only one camera sees the tag, its pose is passed
-   through unfused — the system degrades gracefully instead of dropping out.
+5. **Fallback.** If only one camera sees the tag, its pose (already
+   world-transformed) is passed through unfused — the system degrades
+   gracefully instead of dropping out. Every path out of the node,
+   including every fallback, is genuinely world frame: the conversion
+   happens *before* the fuse-or-fallback decision.
 
 **Character:** smooth, full 6-DoF, robust — but inherits any fx·L scale
 error at first order.
@@ -215,6 +227,14 @@ only) + `/camX/camera_info` (K, distortion) + TF (camera positions).
 8. **Degeneracy guard.** As the rays approach parallel (tag far away
    relative to the baseline) the intersection becomes ill-conditioned; the
    node warns and skips instead of publishing garbage.
+
+9. **Single-camera fallback.** One ray has direction but no depth, so
+   true geometric triangulation is impossible below two cameras. Instead
+   of going silent, the node publishes the surviving camera's **PnP pose
+   transformed to world** on the same topic, and flags the regime on
+   `/apriltag/geometric_mode` (2.0/3.0 = ray count in true geometric
+   mode; **1.0 = PnP fallback**). While in fallback, scale rides on fx·L
+   and `ray_gap` pauses — filter logged data by mode when analysing.
 
 **Character:** scale rides on the **baseline**, not fx·L; immune to
 tag_size errors and to planar-pose-ambiguity flips (the centre pixel
@@ -336,6 +356,11 @@ one specific measurement configuration.
 | `/apriltag/camera_baseline` | Float32 | Distance (m) between the two camera optical centres, from the static TFs. Published once at startup. |
 | `/apriltag/ray_gap` | Float32 | Method B: miss distance (m) between the two rays at closest approach. Isolates extrinsic **rotation** error + pixel noise. Healthy: < 1–2 cm. |
 | `/apriltag/scale_check` | Float32 | ‖geometric position‖ / ‖fused position‖. Live readout of the fx·L scale error: 1.00 = none; e.g. 0.945 ⇒ fusion over-ranges ~5.8%. Most meaningful with `geo_baseline_override` set to the tape-measured baseline. |
+| `/apriltag/triangulated_distance` | Float32 | √(x²+y²+z²) of the fused pose = distance from cam1's lens (m). Directly comparable to a laser/tape measurement cam1 → tag centre — the verification topic. |
+| `/apriltag/geometric_distance` | Float32 | Same, for the geometric position. Compare both against the laser in one table; equal offsets ⇒ shared upstream cause, differing ⇒ per-method cause. |
+| `/apriltag/geometric_mode` | Float32 | Rays used by the geometric node: 2.0/3.0 = true ray intersection; **1.0 = single-camera PnP fallback** (scale-independence suspended). Annotate logs with this. |
+| `/apriltag/pairwise_error_12` `_13` `_23` | Float32 | *(3-cam)* Per-pair world-frame disagreement (m). The pair pattern identifies the faulty camera. |
+| `/apriltag/active_cameras` | Float32 | *(3-cam)* How many cameras were fused this instant. Dips reveal coverage holes during robot runs. |
 
 ### Per-camera intermediate topics
 
@@ -438,3 +463,32 @@ Key node parameters (set in the launch file):
 12. **MAD can't reject a smeared distribution** — it only removes outliers
     relative to the bulk. That's what the spread gate is for: on a static
     scene, millimetres or it's wrong.
+
+---
+
+## 11. Three-camera operation
+
+Launch: `triple_apriltag_triangulation.launch.py` (cam1/cam2/cam3 staggered
+0/3/6 s; computation at 9 s). Calibrate both extrinsics in one run with
+`measure_extrinsics_multi` — pairs (1-2) and (1-3) fill independently
+whenever cam1 and that camera both see the tag.
+
+What the third camera changes:
+
+- **Fusion gains voting.** All pairwise disagreements are checked and the
+  *largest mutually-consistent subset* is fused. A camera disagreeing with
+  an agreeing majority is identified by name, dropped, and logged — two
+  cameras give redundancy, three give **fault identification**.
+- **Geometric gains over-determination.** The 2-ray midpoint generalizes to
+  a least-squares intersection (the point minimizing summed squared
+  distance to all rays; one 3×3 solve). Three rays = 6 constraints on 3
+  unknowns: better-conditioned position, `ray_gap` becomes an RMS residual,
+  and a third viewing direction rescues the near-parallel degeneracy.
+- **What it does NOT buy:** accuracy is only marginally improved (√N
+  averaging). The real gains are coverage, occlusion robustness, and fault
+  identification. Cam1 remains the world datum — protect its mount above
+  all; cam1 moving is the one failure the system cannot self-diagnose.
+- **USB reality check:** three identical webcams on one controller may not
+  fit even with mjpeg2rgb; if cam3 dies with "Unable to start stream",
+  move it to a different USB controller. In Docker, the new
+  /dev/video4+5 must be mapped in compose and the container recreated.
