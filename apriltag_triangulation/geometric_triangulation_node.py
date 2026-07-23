@@ -108,6 +108,8 @@ class GeometricTriangulationNode(Node):
         # ── Publishers ────────────────────────────────────────────────────
         self.pub_pose  = self.create_publisher(
             PoseStamped, '/apriltag/geometric_pose', 10)
+        self.pub_dist  = self.create_publisher(
+            Float32, '/apriltag/geometric_distance', 10)
         self.pub_gap   = self.create_publisher(
             Float32, '/apriltag/ray_gap', 10)
         self.pub_scale = self.create_publisher(
@@ -241,6 +243,11 @@ class GeometricTriangulationNode(Node):
         else:
             ps.pose.orientation.w = 1.0
         self.pub_pose.publish(ps)
+
+        # Distance from world origin (= cam1 lens): √(x²+y²+z²).
+        dist = Float32()
+        dist.data = float(np.linalg.norm(midpoint))
+        self.pub_dist.publish(dist)
 
         # ── Scale check vs pose fusion ────────────────────────────────────
         if self.fused_latest is not None and self._fresh(self.fused_latest):

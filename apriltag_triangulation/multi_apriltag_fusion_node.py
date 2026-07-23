@@ -94,6 +94,8 @@ class MultiAprilTagFusionNode(Node):
 
         self.pub_fused = self.create_publisher(
             PoseStamped, '/apriltag/triangulated_pose', 10)
+        self.pub_dist = self.create_publisher(
+            Float32, '/apriltag/triangulated_distance', 10)
         self.pub_cam = {
             i: self.create_publisher(
                 PoseStamped, f'/apriltag/cam{i}_pose', 10)
@@ -182,6 +184,11 @@ class MultiAprilTagFusionNode(Node):
 
         T_fused = average_pose_set([world[i] for i in best])
         self.pub_fused.publish(self._stamped(T_fused))
+
+        # Distance from world origin (= cam1 lens): √(x²+y²+z²).
+        dist = Float32()
+        dist.data = float(np.linalg.norm(T_fused[:3, 3]))
+        self.pub_dist.publish(dist)
 
         a = Float32(); a.data = float(len(best))
         self.pub_active.publish(a)

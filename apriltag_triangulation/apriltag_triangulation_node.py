@@ -114,6 +114,7 @@ class AprilTagTriangulationNode(Node):
 
         # ── Publishers ────────────────────────────────────────────────────────
         self.pub_fused     = self.create_publisher(PoseStamped, '/apriltag/triangulated_pose',       10)
+        self.pub_dist      = self.create_publisher(Float32,     '/apriltag/triangulated_distance',   10)
         self.pub_cam1      = self.create_publisher(PoseStamped, '/apriltag/cam1_pose',               10)
         self.pub_cam2      = self.create_publisher(PoseStamped, '/apriltag/cam2_pose',               10)
         self.pub_error     = self.create_publisher(Float32,     '/apriltag/triangulation_error',     10)
@@ -232,6 +233,11 @@ class AprilTagTriangulationNode(Node):
 
         self.pub_fused.publish(self._stamped(T_fused))
 
+        # Distance from world origin (= cam1 lens): √(x²+y²+z²).
+        # Directly comparable to a laser/tape measurement cam1 → tag centre.
+        dist = Float32()
+        dist.data = float(np.linalg.norm(T_fused[:3, 3]))
+        self.pub_dist.publish(dist)
 
 def main(args=None):
     rclpy.init(args=args)
