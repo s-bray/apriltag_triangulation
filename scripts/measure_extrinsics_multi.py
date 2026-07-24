@@ -1,23 +1,25 @@
 #!/usr/bin/env python3
 """
-measure_extrinsics_multi.py — calibrate cam2 AND cam3 relative to cam1
-in a single run, using one stationary AprilTag.
+measure_extrinsics_multi.py — v2
 
-For each secondary camera X:
+Calibrates cam1→cam2 AND cam1→cam3 in one run, where each pair is
+processed EXACTLY like the proven 2-camera script: same freshness
+pairing, same pre-filter statistics printout, same >2 cm spread gate,
+same MAD outlier rejection report, and the same fx·L scale diagnostic —
+now per pair, with a tape-measured known baseline for each.
+
     T_cam1_camX = T_cam1_tag @ inv(T_camX_tag)
 
-Samples for pair (1,X) are collected whenever cam1 AND camX are both
-fresh — camX pairs fill independently, so the tag doesn't need to be in
-all three views at once (though a spot visible to all three is fastest).
-
-All the v3 safeguards carry over per pair: freshness pairing, spread
-gate, MAD outlier rejection, quaternion hemisphere averaging, and the
-scale diagnostic against known_baseline (checked on the cam1-cam2 pair).
+Pairs fill independently: a (1,X) sample is taken whenever cam1 and camX
+are BOTH fresh, so the tag does not need to be in all three views at
+once (though a triple-visible spot fills fastest).
 
 Usage:
     ros2 run apriltag_triangulation measure_extrinsics_multi \
         --ros-args -p n_samples:=200 \
-        -p known_baseline:=0.59 -p current_tag_size:=0.15
+        -p known_baseline_12:=0.59 \
+        -p known_baseline_13:=0.72 \
+        -p current_tag_size:=0.15
 """
 
 import rclpy
@@ -35,50 +37,26 @@ def pose_to_matrix(pose):
     return T
 
 
-def robust_average(T_list, mad_k=3.0):
-    """MAD-filter on baseline length, then average. Returns
-    (t_mean, t_std, q_mean, baseline, n_rejected, spread)."""
-    translations = np.array([T[:3, 3] for T in T_list])
-    rotations = np.array([R.from_matrix(T[:3, :3]).as_quat() for T in T_list])
-    baselines = np.linalg.norm(translations, axis=1)
-    spread = float(np.max(baselines) - np.min(baselines))
-
-    median = np.median(baselines)
-    mad = max(np.median(np.abs(baselines - median)), 1e-8)
-    mask = np.abs(baselines - median) < mad_k * 1.4826 * mad
-
-    translations = translations[mask]
-    rotations = rotations[mask]
-
-    t_mean = np.mean(translations, axis=0)
-    t_std = np.std(translations, axis=0)
-
-    for i in range(1, len(rotations)):
-        if np.dot(rotations[0], rotations[i]) < 0:
-            rotations[i] = -rotations[i]
-    q_mean = np.mean(rotations, axis=0)
-    q_mean /= np.linalg.norm(q_mean)
-
-    return (t_mean, t_std, q_mean, float(np.linalg.norm(t_mean)),
-            int(np.sum(~mask)), spread)
-
-
 class MultiExtrinsicMeasurer(Node):
 
     def __init__(self):
         super().__init__('multi_extrinsic_calibrator')
 
         self.declare_parameter('n_samples', 200)
-        self.declare_parameter('known_baseline', 0.0)   # tape cam1<->cam2 (m)
+        self.declare_parameter('known_baseline_12', 0.0)  # tape cam1<->cam2 (m)
+        self.declare_parameter('known_baseline_13', 0.0)  # tape cam1<->cam3 (m)
         self.declare_parameter('current_tag_size', 0.1)
         self.declare_parameter('max_age_sec', 1.0)
         self.declare_parameter('mad_k', 3.0)
 
-        self.n_samples  = self.get_parameter('n_samples').value
-        self.known_bl   = self.get_parameter('known_baseline').value
-        self.tag_size   = self.get_parameter('current_tag_size').value
-        self.max_age    = self.get_parameter('max_age_sec').value
-        self.mad_k      = self.get_parameter('mad_k').value
+        self.n_samples = self.get_parameter('n_samples').value
+        self.known_bl = {
+            2: self.get_parameter('known_baseline_12').value,
+            3: self.get_parameter('known_baseline_13').value,
+        }
+        self.tag_size = self.get_parameter('current_tag_size').value
+        self.max_age  = self.get_parameter('max_age_sec').value
+        self.mad_k    = self.get_parameter('mad_k').value
 
         self.latest = {1: None, 2: None, 3: None}
         self.samples = {2: [], 3: []}   # pair (1,X) → list of T_cam1_camX
@@ -90,10 +68,21 @@ class MultiExtrinsicMeasurer(Node):
 
         self.create_timer(0.1, self._collect)
         self.get_logger().info(
-            f'Multi-extrinsic calibration: {self.n_samples} samples per pair '
-            '(1-2 and 1-3). Tag rigid and still; each pair fills whenever '
-            'cam1 and that camera both see it.')
+            '\n' + '=' * 60 +
+            '\nMulti-camera Extrinsic Calibration (v2 — per-pair '
+            'diagnostics)\n' + '=' * 60 +
+            f'\n  n_samples/pair    : {self.n_samples}' +
+            f'\n  known_baseline_12 : {self.known_bl[2]:.4f} m '
+            f'({"diagnostic ON" if self.known_bl[2] > 0 else "off"})' +
+            f'\n  known_baseline_13 : {self.known_bl[3]:.4f} m '
+            f'({"diagnostic ON" if self.known_bl[3] > 0 else "off"})' +
+            f'\n  current_tag_size  : {self.tag_size:.4f} m '
+            '(must match live apriltag nodes)' +
+            f'\n  max_age_sec       : {self.max_age:.2f} s' +
+            '\nHold the tag STILL on a rigid mount, visible to all '
+            'cameras if possible.')
 
+    # ── Collection ────────────────────────────────────────────────────────
     def _cb(self, i, msg):
         self.latest[i] = msg
 
@@ -113,7 +102,6 @@ class MultiExtrinsicMeasurer(Node):
 
         T1 = pose_to_matrix(self.latest[1].pose)
         progressed = False
-
         for X in (2, 3):
             if len(self.samples[X]) >= self.n_samples:
                 continue
@@ -128,48 +116,151 @@ class MultiExtrinsicMeasurer(Node):
                 f'pair 1-3: {len(self.samples[3])}/{self.n_samples}')
 
         if all(len(self.samples[X]) >= self.n_samples for X in (2, 3)):
-            self._compute()
+            results = {}
+            for X in (2, 3):
+                results[X] = self._analyze_pair(X)
+            self._print_launch(results)
             rclpy.shutdown()
 
-    def _compute(self):
-        results = {}
+    # ── Per-pair analysis: EXACT replica of the 2-camera script ──────────
+    def _analyze_pair(self, X):
+        T_list = self.samples[X]
+        translations = np.array([T[:3, 3] for T in T_list])
+        rotations = np.array([R.from_matrix(T[:3, :3]).as_quat()
+                              for T in T_list])
+        baselines = np.linalg.norm(translations, axis=1)
+
         print('\n' + '=' * 60)
-        print('MULTI-CAMERA EXTRINSIC RESULTS')
+        print(f'PAIR cam1–cam{X}')
         print('=' * 60)
+        print('Baseline statistics BEFORE outlier rejection')
+        print('-' * 60)
+        print(f'  min    : {np.min(baselines):.6f} m')
+        print(f'  max    : {np.max(baselines):.6f} m')
+        print(f'  mean   : {np.mean(baselines):.6f} m')
+        print(f'  median : {np.median(baselines):.6f} m')
+        print(f'  std    : {np.std(baselines):.6f} m')
 
-        for X in (2, 3):
-            t, ts, q, bl, nrej, spread = robust_average(
-                self.samples[X], self.mad_k)
-            results[X] = (t, q)
-            print(f'\n── cam{X} relative to cam1 ─────────────────────────')
-            print(f'  translation : {t[0]:+.6f}  {t[1]:+.6f}  {t[2]:+.6f}')
-            print(f'  std         : {ts[0]:.6f}  {ts[1]:.6f}  {ts[2]:.6f}')
-            print(f'  quaternion  : {q[0]:+.6f}  {q[1]:+.6f}  '
-                  f'{q[2]:+.6f}  {q[3]:+.6f}')
-            print(f'  baseline    : {bl:.6f} m   '
-                  f'(rejected {nrej}, raw spread {spread*1000:.1f} mm)')
-            if spread > 0.02:
-                print('  !! spread > 2 cm on a static scene — result NOT')
-                print('  !! trustworthy for this pair; find the cause '
-                  '(movement /')
-                print('  !! shared TF frames / ambiguity flips) and re-run.')
+        # ── Spread gate ──────────────────────────────────────────────────
+        spread = float(np.max(baselines) - np.min(baselines))
+        if spread > 0.02:
+            print('\n' + '!' * 60)
+            print(f'  WARNING: pair 1-{X} baseline spread is '
+                  f'{spread*100:.1f} cm on a')
+            print('  supposedly static scene (expected: a few millimetres).')
+            print('  The averaged result below is NOT trustworthy. Likely causes:')
+            print('    - tag or a camera moved during collection')
+            print('    - both cameras publishing the same TF tag frame')
+            print('      (must be unique, e.g. tag0_cam1 / tag0_cam2 / tag0_cam3)')
+            print('    - pose-ambiguity flips (tag too frontal — angle it 15-25°)')
+            print('  Fix the cause and re-run before using these numbers.')
+            print('!' * 60)
 
-        # Scale diagnostic on the 1-2 pair
-        if self.known_bl > 0:
-            bl12 = float(np.linalg.norm(results[2][0]))
-            err = (bl12 - self.known_bl) / self.known_bl * 100.0
-            print(f'\nSCALE DIAGNOSTIC (pair 1-2): measured {bl12:.4f} m vs '
-                  f'tape {self.known_bl:.4f} m → {err:+.2f}%')
-            if abs(err) >= 1.5:
-                print(f'  → fx·L product off by ~{err:+.1f}%. tag_size '
-                      f'caliper-verified ⇒ intrinsics; else try tag_size '
-                      f'= {self.tag_size * self.known_bl / bl12:.4f} m.')
-                print('  → Do NOT rescale these extrinsics; fix the cause '
-                      'and re-run.')
+        # ── MAD outlier rejection ────────────────────────────────────────
+        median = np.median(baselines)
+        mad = max(np.median(np.abs(baselines - median)), 1e-8)
+        threshold = self.mad_k * 1.4826 * mad
+        mask = np.abs(baselines - median) < threshold
 
+        print('\nOutlier rejection (MAD-based)')
+        print('-' * 60)
+        print(f'  rejected       : {np.sum(~mask)}')
+        print(f'  accepted       : {np.sum(mask)}')
+        print(f'  accepted range : {median - threshold:.6f} to '
+              f'{median + threshold:.6f} m')
+
+        translations = translations[mask]
+        rotations = rotations[mask]
+
+        if len(translations) < 5:
+            print(f'\n[ERROR] pair 1-{X}: too few samples survived outlier '
+                  'rejection. Re-run with the tag held more still.')
+            return None
+
+        t_mean = np.mean(translations, axis=0)
+        t_std = np.std(translations, axis=0)
+        measured_baseline = float(np.linalg.norm(t_mean))
+
+        q_ref = rotations[0].copy()
+        for i in range(len(rotations)):
+            if np.dot(q_ref, rotations[i]) < 0:
+                rotations[i] = -rotations[i]
+        q_mean = np.mean(rotations, axis=0)
+        q_mean /= np.linalg.norm(q_mean)
+
+        # ── Scale diagnostic (never applied to the result) ───────────────
+        print('\nSCALE DIAGNOSTIC')
+        print('-' * 60)
+        kb = self.known_bl[X]
+        if kb > 0.0:
+            error_pct = (measured_baseline - kb) / kb * 100.0
+            implied_tag_size = self.tag_size * (kb / measured_baseline)
+
+            print(f'  Measured baseline              : {measured_baseline:.6f} m')
+            print(f'  Known (tape-measured) baseline : {kb:.6f} m')
+            print(f'  Error                          : {error_pct:+.2f} %')
+            print(f'  Currently configured tag_size  : {self.tag_size:.4f} m')
+
+            if abs(error_pct) < 1.5:
+                print('\n  → Within ~1.5%. System scale looks correct.')
+            else:
+                scale = kb / measured_baseline
+                print(f'\n  → SYSTEM SCALE ERROR of {error_pct:+.1f}% detected.')
+                print(f'    Correction scale (this setup only):')
+                print(f'      true ≈ {scale:.4f} × system_output')
+                print(f'      equivalently: depth_scale param = {1.0/scale:.4f}')
+                print('    CAUTION: only guaranteed near the tag position used')
+                print('    in THIS run; if the cause is intrinsics (fx), the')
+                print('    factor varies across the workspace.')
+                print('    The script measures only the fx·L product; it cannot')
+                print('    tell which factor is wrong:')
+                print(f'      (a) tag_size unverified → try {implied_tag_size:.4f} m')
+                print(f'      (b) tag_size caliper-verified → intrinsics (fx)')
+                print(f'          of cam1 and/or cam{X} off by ~{(scale-1)*100:+.1f}% —')
+                print('          recalibrate per camera, check calib resolution')
+                print('          matches the stream.')
+                print('    Hint: error differing between pair 1-2 and pair 1-3')
+                print('    → per-camera intrinsics (b), since tag_size errors')
+                print('    are identical for every pair.')
+                print('  → Do NOT force-rescale this extrinsic to match the')
+                print('    known baseline (breaks runtime consistency).')
+                print('  → Fix the cause upstream, relaunch, re-run FRESH.')
+        else:
+            print(f'  known_baseline_1{X} not provided (or 0) — skipping.')
+            print(f'  Pass -p known_baseline_1{X}:=<tape_m> to check for a')
+            print('  tag_size / intrinsics scale error on this pair.')
+
+        # ── Pair result ──────────────────────────────────────────────────
+        print(f'''
+RESULT pair 1-{X}  (uncorrected — use as-is)
+Translation cam{X} relative to cam1:
+  x = {t_mean[0]:.6f}
+  y = {t_mean[1]:.6f}
+  z = {t_mean[2]:.6f}
+Translation std (aim for < 0.01 m):
+  x = {t_std[0]:.6f}
+  y = {t_std[1]:.6f}
+  z = {t_std[2]:.6f}
+Quaternion:
+  qx = {q_mean[0]:.6f}
+  qy = {q_mean[1]:.6f}
+  qz = {q_mean[2]:.6f}
+  qw = {q_mean[3]:.6f}
+Measured baseline: {measured_baseline:.6f} m''')
+
+        return (t_mean, q_mean)
+
+    # ── Combined launch command ──────────────────────────────────────────
+    def _print_launch(self, results):
+        if results.get(2) is None or results.get(3) is None:
+            print('\nOne or more pairs failed — fix and re-run before '
+                  'launching.')
+            return
         t2, q2 = results[2]
         t3, q3 = results[3]
-        print('\nLaunch command:')
+        print('\n' + '=' * 60)
+        print('Launch command (uses current_tag_size — recalibrate if '
+              'changed):')
         print(f'''
 ros2 launch apriltag_triangulation triple_apriltag_triangulation.launch.py \\
     tag_size:={self.tag_size:.4f} tag_id:=0 \\
